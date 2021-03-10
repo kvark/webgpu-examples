@@ -3,8 +3,8 @@
 <head>
     <meta charset="utf-8">
     <link rel="stylesheet" href="css/example.css">
-    <script src="utils/gl-matrix.js"></script>
-    <script src="utils/utils.js"></script>
+    <script src="https://tsherif.github.io/webgpu-examples/utils/gl-matrix.js"></script>
+    <script src="https://tsherif.github.io/webgpu-examples/utils/utils.js"></script>
 </head>
 <!--
   The MIT License (MIT)
@@ -33,7 +33,7 @@
 <script>
 utils.checkSupport();
 utils.addDescription(
-    "Textured, Lit Cube",
+    "Textured & Lit Cube",
     "Creating a texture from a DOM image, setting up vertex and uniform buffers, and animating a cube.",
     "cube-texture-lighting.html"
 );
@@ -46,7 +46,8 @@ utils.addDescription(
     //////////////////////////////////////////
 
     const img = document.createElement("img");
-    img.src = "img/marble.png";
+    img.crossOrigin = "anonymous";
+    img.src = "https://tsherif.github.io/webgpu-examples/img/marble.png";
 
     const [adapter, glslang] = await Promise.all([
         navigator.gpu.requestAdapter(),
@@ -59,13 +60,14 @@ utils.addDescription(
     ///////////////////////////////////////
 
     const device = await adapter.requestDevice();
+    device.onuncapturederror = function(event) { console.log(event.error); };
     
     const canvas = document.getElementById("webgpu-canvas");
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
     const context = canvas.getContext("gpupresent");
-    const swapChainFormat = await context.getSwapChainPreferredFormat(device);
+    const swapChainFormat = context.getSwapChainPreferredFormat(adapter);
     const swapChain = context.configureSwapChain({
         device,
         format: swapChainFormat
@@ -80,34 +82,24 @@ utils.addDescription(
         magFilter: "linear"
     });
 
-    const textureData = utils.getImageData(img);
-    const textureDataBuffer = device.createBuffer({
-        size: textureData.byteLength,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
-    });
-
-    device.defaultQueue.writeBuffer(textureDataBuffer, 0, textureData)
-
     const texture = device.createTexture({
+        label: "texture",
         size: [img.width, img.height, 1],
         format: "rgba8unorm",
         usage: GPUTextureUsage.SAMPLED | GPUTextureUsage.COPY_DST
     });
 
-    const textureLoadEncoder = device.createCommandEncoder();
-    textureLoadEncoder.copyBufferToTexture({
-        buffer: textureDataBuffer,
-        bytesPerRow: img.width * 4,
-        imageHeight: img.height
-    }, {
-        texture,
-    }, [
-        img.width, 
-        img.height, 
-        1
-    ]);
-
-    device.defaultQueue.submit([textureLoadEncoder.finish()]);
+    const textureData = utils.getImageData(img).buffer;
+    device.queue.writeTexture(
+        { texture },
+        textureData,
+        { bytesPerRow: img.width * 4 },
+        [
+            img.width, 
+            img.height, 
+            1
+        ]
+    );
     
     ////////////////////////////////////////
     // Create vertex buffers and load data
@@ -117,21 +109,31 @@ utils.addDescription(
     const numVertices = cubeData.positions.length / 3;
 
     const positionBuffer = device.createBuffer({
+        label: "position",
         size: cubeData.positions.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+        usage: GPUBufferUsage.VERTEX,
+        mappedAtCreation: true,
     });
-    const normalBuffer = device.createBuffer({
-        size: cubeData.normals.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-    });
-    const uvBuffer = device.createBuffer({
-        size: cubeData.uvs.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-    });
+    new Uint8Array(positionBuffer.getMappedRange()).set(new Uint8Array(cubeData.positions.buffer));
+    positionBuffer.unmap();
 
-    device.defaultQueue.writeBuffer(positionBuffer, 0, cubeData.positions);
-    device.defaultQueue.writeBuffer(normalBuffer, 0, cubeData.normals);
-    device.defaultQueue.writeBuffer(uvBuffer, 0, cubeData.uvs);
+    const normalBuffer = device.createBuffer({
+        label: "normal",
+        size: cubeData.normals.byteLength,
+        usage: GPUBufferUsage.VERTEX,
+        mappedAtCreation: true,
+    });
+    new Uint8Array(normalBuffer.getMappedRange()).set(new Uint8Array(cubeData.normals.buffer));
+    normalBuffer.unmap();
+
+    const uvBuffer = device.createBuffer({
+        label: "uv",
+        size: cubeData.uvs.byteLength,
+        usage: GPUBufferUsage.VERTEX,
+        mappedAtCreation: true,
+    });
+    new Uint8Array(uvBuffer.getMappedRange()).set(new Uint8Array(cubeData.uvs.buffer));
+    uvBuffer.unmap();
 
     /////////////////
     // Uniform data
@@ -156,40 +158,42 @@ utils.addDescription(
     /////////////////////////////////////////////
 
     const vertexUniformBuffer = device.createBuffer({
+        label: "vert-uniform",
         size: 128,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
     const fragmentUniformBuffer = device.createBuffer({
+        label: "frag-uniform",
         size: 32,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    device.defaultQueue.writeBuffer(vertexUniformBuffer, 64, viewProjectionMatrix);
-    device.defaultQueue.writeBuffer(fragmentUniformBuffer, 0, eyePosition);
-    device.defaultQueue.writeBuffer(fragmentUniformBuffer, 16, lightPosition);
+    device.queue.writeBuffer(vertexUniformBuffer, 64, viewProjectionMatrix.buffer);
+    device.queue.writeBuffer(fragmentUniformBuffer, 0, eyePosition.buffer);
+    device.queue.writeBuffer(fragmentUniformBuffer, 16, lightPosition.buffer);
 
     const sceneUniformBindGroupLayout = device.createBindGroupLayout({
         entries: [
             {
                 binding: 0,
                 visibility: GPUShaderStage.VERTEX,
-                type: "uniform-buffer"
+                buffer: {},
             },
             {
                 binding: 1,
                 visibility: GPUShaderStage.FRAGMENT,
-                type: "uniform-buffer"
+                buffer: {},
             },
             {
                 binding: 2,
                 visibility: GPUShaderStage.FRAGMENT,
-                type: "sampler"
+                sampler: {},
             },
             {
                 binding: 3,
                 visibility: GPUShaderStage.FRAGMENT,
-                type: "sampled-texture"
+                texture: {},
             }
         ]
     });
@@ -228,7 +232,7 @@ utils.addDescription(
     const vs = `
     #version 450
 
-    layout(location=0) in vec4 position;
+    layout(location=0) in vec3 position;
     layout(location=1) in vec3 normal;
     layout(location=2) in vec2 uv;
 
@@ -242,7 +246,7 @@ utils.addDescription(
     layout(location=2) out vec2 vUV;
     
     void main() {
-        vec4 worldPosition = worldMatrix * position;
+        vec4 worldPosition = worldMatrix * vec4(position, 1.0);
         vPosition = worldPosition.xyz;
         vNormal = mat3(worldMatrix) * normal;
         vUV = uv;
@@ -283,31 +287,17 @@ utils.addDescription(
 
     const pipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts: [sceneUniformBindGroupLayout]}),
-        vertexStage: {
+        vertex: {
             module: device.createShaderModule({
                 code: glslang.compileGLSL(vs, "vertex")
             }),
-            entryPoint: "main"
-        },
-        fragmentStage: {
-            module: device.createShaderModule({
-                code: glslang.compileGLSL(fs, "fragment")
-            }),
-            entryPoint: "main"
-        },
-        primitiveTopology: "triangle-list",
-        depthStencilState: {
-            format: "depth24plus",
-            depthWriteEnabled: true,
-            depthCompare: "less"
-        },
-        vertexState: {
-            vertexBuffers: [
+            entryPoint: "main",
+            buffers: [
                 {
                     arrayStride: 12,
                     attributes: [{
                         shaderLocation: 0,
-                        format: "float3",
+                        format: "float32x3",
                         offset: 0
                     }]
                 },
@@ -315,7 +305,7 @@ utils.addDescription(
                     arrayStride: 12,
                     attributes: [{
                         shaderLocation: 1,
-                        format: "float3",
+                        format: "float32x3",
                         offset: 0
                     }]
                 },
@@ -323,15 +313,29 @@ utils.addDescription(
                     arrayStride: 8,
                     attributes: [{
                         shaderLocation: 2,
-                        format: "float2",
+                        format: "float32x2",
                         offset: 0
                     }]
                 }
-            ]
+            ],
         },
-        colorStates: [{
-            format: swapChainFormat
-        }]
+        fragment: {
+            module: device.createShaderModule({
+                code: glslang.compileGLSL(fs, "fragment")
+            }),
+            entryPoint: "main",
+            targets: [{
+                format: swapChainFormat
+            }],
+        },
+        primitive: {
+            topology: "triangle-list",
+        },
+        depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less",
+        },
     });
 
     ///////////////////////////
@@ -341,16 +345,16 @@ utils.addDescription(
     const depthTexture = device.createTexture({
         size: [canvas.width, canvas.height, 1],
         format: "depth24plus",
-        usage:  GPUTextureUsage.OUTPUT_ATTACHMENT
+        usage:  GPUTextureUsage.RENDER_ATTACHMENT
     })
 
     const renderPassDescription = {
         colorAttachments: [{
-            attachment: swapChain.getCurrentTexture().createView(),
-            loadValue: [0, 0, 0, 1]
+            view: swapChain.getCurrentTexture().createView(),
+            loadValue: [0.1, 0.2, 0.3, 1]
         }],
         depthStencilAttachment: {
-            attachment: depthTexture.createView(),
+            view: depthTexture.createView(),
             depthLoadValue: 1,
             depthStoreOp: "store",
             stencilLoadValue: 0,
@@ -367,7 +371,7 @@ utils.addDescription(
         rotation[2] += 0.005;
         utils.xformMatrix(modelMatrix, null, rotation, null);
         
-        device.defaultQueue.writeBuffer(vertexUniformBuffer, 0, modelMatrix);
+        device.queue.writeBuffer(vertexUniformBuffer, 0, modelMatrix.buffer);
 
         ////////////////////
         // Swap framebuffer
@@ -393,7 +397,7 @@ utils.addDescription(
         renderPass.draw(numVertices, 1, 0, 0);
         renderPass.endPass();
 
-        device.defaultQueue.submit([commandEncoder.finish()]);
+        device.queue.submit([commandEncoder.finish()]);
 
         requestAnimationFrame(draw);
     });
