@@ -40,7 +40,7 @@ utils.addDescription(
 
 (async () => {
     //////////////////////////////////////////
-    // Set up WebGPU adapter, load glslang
+    // Set up WebGPU adapter
     // to compile GLSL to SPIR-V, load
     // texture image
     //////////////////////////////////////////
@@ -49,9 +49,8 @@ utils.addDescription(
     img.crossOrigin = "anonymous";
     img.src = "https://tsherif.github.io/webgpu-examples/img/marble.png";
 
-    const [adapter, glslang] = await Promise.all([
+    const [adapter] = await Promise.all([
         navigator.gpu.requestAdapter(),
-        import("https://unpkg.com/@webgpu/glslang@0.0.7/web/glslang.js").then(m => m.default()),
         img.decode()
     ]);
 
@@ -229,69 +228,67 @@ utils.addDescription(
     // Create render pipeline
     ///////////////////////////
 
-    const vs = `
-    #version 450
+    const wgsl = `
+        [[location(0)]] var<in> i_position: vec3<f32>;
+        [[location(1)]] var<in> i_normal: vec3<f32>;
+        [[location(2)]] var<in> i_uv: vec2<f32>;
 
-    layout(location=0) in vec3 position;
-    layout(location=1) in vec3 normal;
-    layout(location=2) in vec2 uv;
+        [[block]]
+        struct VertexUniforms {
+            worldMatrix: mat4x4<f32>;
+            viewProjectionMatrix: mat4x4<f32>;
+        };
+        [[group(0), binding(0)]] var<uniform> vert_uniforms: VertexUniforms;
 
-    layout(set=0, binding=0) uniform VertexUniforms {
-        mat4 worldMatrix;
-        mat4 viewProjectionMatrix;
-    };
+        [[builtin(position)]] var<out> o_pos: vec4<f32>;
+        [[location(0)]] var<out> o_position: vec3<f32>;
+        [[location(1)]] var<out> o_normal: vec3<f32>;
+        [[location(2)]] var<out> o_uv: vec2<f32>;
 
-    layout(location=0) out vec3 vPosition;
-    layout(location=1) out vec3 vNormal;
-    layout(location=2) out vec2 vUV;
-    
-    void main() {
-        vec4 worldPosition = worldMatrix * vec4(position, 1.0);
-        vPosition = worldPosition.xyz;
-        vNormal = mat3(worldMatrix) * normal;
-        vUV = uv;
-        gl_Position = viewProjectionMatrix * worldPosition;
-    } 
-    `.trim();
+        [[stage(vertex)]]
+        fn vs_main() {
+            const wm: mat4x4<f32> = vert_uniforms.worldMatrix;
+            const worldPosition: vec4<f32> = wm * vec4<f32>(i_position, 1.0);
+            o_position = worldPosition.xyz;
+            o_normal = mat3x3<f32>(wm.x.xyz, wm.y.xyz, wm.z.xyz) * i_normal;
+            o_uv = i_uv;
+            o_pos = vert_uniforms.viewProjectionMatrix * worldPosition;
+        }
 
-    const fs = `
-    #version 450
-    
-    layout(location=0) in vec3 vPosition;
-    layout(location=1) in vec3 vNormal;
-    layout(location=2) in vec2 vUV;
+        [[block]]
+        struct FragmentUniforms {
+            eyePosition: vec4<f32>;
+            lightPosition: vec4<f32>;
+        };
+        [[group(0), binding(1)]] var<uniform> frag_uniforms: FragmentUniforms;
+        [[group(0), binding(2)]] var sampler: sampler;
+        [[group(0), binding(3)]] var texture: texture_2d<f32>;
+        [[location(0)]] var<out> o_color: vec4<f32>;
+        const ambient: f32 = 0.1;
 
-    layout(set=0, binding=1) uniform FragmentUniforms {
-        vec4 eyePosition;
-        vec4 lightPosition;
-    };
+        [[stage(fragment)]]
+        fn fs_main() {
+            //o_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+            const surfaceColor: vec3<f32> = textureSample(texture, sampler, i_uv).rgb;
+            const normal: vec3<f32> = normalize(i_normal);
+            const eyeVec: vec3<f32> = normalize(frag_uniforms.eyePosition.xyz - i_position);
+            const incidentVec: vec3<f32> = normalize(i_position - frag_uniforms.lightPosition.xyz);
+            const lightVec: vec3<f32> = -incidentVec;
+            const diffuse: f32 = max(dot(lightVec, normal), 0.0);
+            const highlight: f32 = pow(max(dot(eyeVec, reflect(incidentVec, normal)), 0.0), 100.0);
+            o_color = vec4<f32>(surfaceColor * (diffuse + highlight + ambient), 1.0);
+        }
+    `;
 
-    layout(set=0, binding=2) uniform sampler textureSampler;
-    layout(set=0, binding=3) uniform texture2D textureData;
-
-    layout(location=0) out vec4 fragColor;
-
-    void main() {
-        vec3 surfaceColor = texture(sampler2D(textureData, textureSampler), vUV).rgb;
-
-        vec3 normal = normalize(vNormal);
-        vec3 eyeVec = normalize(eyePosition.xyz - vPosition);
-        vec3 incidentVec = normalize(vPosition - lightPosition.xyz);
-        vec3 lightVec = -incidentVec;
-        float diffuse = max(dot(lightVec, normal), 0.0);
-        float highlight = pow(max(dot(eyeVec, reflect(incidentVec, normal)), 0.0), 100.0);
-        float ambient = 0.1;
-        fragColor = vec4(surfaceColor * (diffuse + highlight + ambient), 1.0);
-    } 
-    `.trim();
+    const shaderModule = device.createShaderModule({
+        code: wgsl,
+    });
 
     const pipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts: [sceneUniformBindGroupLayout]}),
         vertex: {
-            module: device.createShaderModule({
-                code: glslang.compileGLSL(vs, "vertex")
-            }),
-            entryPoint: "main",
+            module: shaderModule,
+            entryPoint: "vs_main",
             buffers: [
                 {
                     arrayStride: 12,
@@ -320,10 +317,8 @@ utils.addDescription(
             ],
         },
         fragment: {
-            module: device.createShaderModule({
-                code: glslang.compileGLSL(fs, "fragment")
-            }),
-            entryPoint: "main",
+            module: shaderModule,
+            entryPoint: "fs_main",
             targets: [{
                 format: swapChainFormat
             }],
